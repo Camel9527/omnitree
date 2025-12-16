@@ -563,7 +563,47 @@ pub enum SyncStatus {
 
 本库使用 **SQLite** 作为元数据存储方案，它提供了功能强大、成熟稳定的数据库能力。
 
-#### 6.1.1 数据库 Schemales (
+#### 6.1.1 数据库表结构
+
+**文件元数据表 (files)**
+
+| 字段名 | 类型 | 约束 | 说明 |
+|--------|------|------|------|
+| path | TEXT | PRIMARY KEY NOT NULL | 文件路径（相对路径） |
+| size | INTEGER | NOT NULL | 文件大小（字节） |
+| modified_time | INTEGER | NOT NULL | 最后修改时间（Unix 时间戳） |
+| is_directory | BOOLEAN | NOT NULL | 是否为目录 |
+| sync_status | TEXT | NOT NULL | 同步状态（Synced/LocalModified/RemoteModified/NotSynced/Syncing） |
+| last_sync_time | INTEGER | NULL | 上次同步时间（Unix 时间戳） |
+| remote_id | TEXT | NULL | 云盘文件 ID |
+
+**同步历史表 (sync_history)**
+
+| 字段名 | 类型 | 约束 | 说明 |
+|--------|------|------|------|
+| sync_time | INTEGER | PRIMARY KEY | 同步时间（Unix 时间戳） |
+| cloud_provider | TEXT | NOT NULL | 云盘提供商（iCloud/OneDrive/GoogleDrive） |
+| downloaded | INTEGER | NOT NULL | 下载文件数量 |
+| uploaded | INTEGER | NOT NULL | 上传文件数量 |
+| deleted | INTEGER | NOT NULL | 删除文件数量 |
+| errors | INTEGER | NOT NULL | 错误数量 |
+| duration_ms | INTEGER | NOT NULL | 同步耗时（毫秒） |
+
+#### 6.1.2 索引
+
+```sql
+-- 按同步状态查询（用于获取待同步文件列表）
+CREATE INDEX idx_sync_status ON files(sync_status);
+
+-- 按修改时间查询（用于增量同步）
+CREATE INDEX idx_modified_time ON files(modified_time);
+```
+
+#### 6.1.3 SQL 定义
+
+```sql
+-- 文件元数据表
+CREATE TABLE files (
     path TEXT PRIMARY KEY NOT NULL,
     size INTEGER NOT NULL,
     modified_time INTEGER NOT NULL,
@@ -587,197 +627,6 @@ CREATE TABLE sync_history (
 -- 索引
 CREATE INDEX idx_sync_status ON files(sync_status);
 CREATE INDEX idx_modified_time ON files(modified_time);
-```
-
-#### 6.1.2 实现示例
-
-```rust
-use rusqlite::{Connection, Result as SqlResult, params};
-use serde::{Serialize, Deserialize};
-
-#[derive(Debug, Clone)]
-pub struct FileMetaInfo {
-    pub path: String,
-    pub size: u64,
-    pub modified_time: u64,
-    pub is_directory: bool,
-    pub sync_status: String,
-    pub last_sync_time: Option<u64>,
-    pub remote_id: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct SyncHistory {
-    pub sync_time: u64,
-    pub cloud_provider: String,
-    pub downloaded: usize,
-    pub uploaded: usize,
-    pub deleted: usize,
-    pub errors: usize,
-    pub duration_ms: u64,
-}
-
-pub struct MetadataStore {
-    conn: Connection,
-}
-
-impl MetadataStore {
-    /// 打开或创建数据库
-    pub fn open(db_path: &Path) -> SqlResult<Self> {
-        let conn = Connection::open(db_path)?;
-        let store = Self { conn };
-        store.init_schema()?;
-        Ok(store)
-    }
-    
-    /// 初始化数据库 schema
-    fn init_schema(&self) -> SqlResult<()> {
-        self.conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS files (
-                path TEXT PRIMARY KEY NOT NULL,
-                size INTEGER NOT NULL,
-                modified_time INTEGER NOT NULL,
-                is_directory BOOLEAN NOT NULL,
-                sync_status TEXT NOT NULL,
-                last_sync_time INTEGER,
-                remote_id TEXT
-            );
-            
-            CREATE TABLE IF NOT EXISTS sync_history (
-                sync_time INTEGER PRIMARY KEY,
-                cloud_provider TEXT NOT NULL,
-                downloaded INTEGER NOT NULL,
-                uploaded INTEGER NOT NULL,
-                deleted INTEGER NOT NULL,
-                errors INTEGER NOT NULL,
-                duration_ms INTEGER NOT NULL
-            );
-            
-            CREATE INDEX IF NOT EXISTS idx_sync_status ON files(sync_status);
-            CREATE INDEX IF NOT EXISTS idx_modified_time ON files(modified_time);"
-        )?;
-        Ok(())
-    }
-    
-    /// 保存文件元数据
-    pub fn save_file_meta(&self, meta: &FileMetaInfo) -> SqlResult<()> {
-        self.conn.execute(
-            "INSERT OR REPLACE INTO files 
-             (path, size, modified_time, is_directory, sync_status, last_sync_time, remote_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                &meta.path,
-                meta.size as i64,
-                meta.modified_time as i64,
-                meta.is_directory,
-                &meta.sync_status,
-                meta.last_sync_time.map(|t| t as i64),
-                &meta.remote_id,
-            ],
-        )?;
-        Ok(())
-    }
-    
-    /// 获取文件元数据
-    pub fn get_file_meta(&self, path: &str) -> SqlResult<Option<FileMetaInfo>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT path, size, modified_time, is_directory, sync_status, last_sync_time, remote_id
-             FROM files WHERE path = ?1"
-        )?;
-        
-        let mut rows = stmt.query(params![path])?;
-        
-        if let Some(row) = rows.next()? {
-            Ok(Some(FileMetaInfo {
-                path: row.get(0)?,
-                size: row.get::<_, i64>(1)? as u64,
-                modified_time: row.get::<_, i64>(2)? as u64,
-                is_directory: row.get(3)?,
-                sync_status: row.get(4)?,
-                last_sync_time: row.get::<_, Option<i64>>(5)?.map(|t| t as u64),
-                remote_id: row.get(6)?,
-            }))
-        } else {
-            Ok(None)
-        }
-    }
-    
-    /// 删除文件元数据
-    pub fn delete_file_meta(&self, path: &str) -> SqlResult<()> {
-        self.conn.execute("DELETE FROM files WHERE path = ?1", params![path])?;
-        Ok(())
-    }
-    
-    /// 列出所有文件元数据
-    pub fn list_all(&self) -> SqlResult<Vec<FileMetaInfo>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT path, size, modified_time, is_directory, sync_status, last_sync_time, remote_id
-             FROM files"
-        )?;
-        
-        let rows = stmt.query_map([], |row| {
-            Ok(FileMetaInfo {
-                path: row.get(0)?,
-                size: row.get::<_, i64>(1)? as u64,
-                modified_time: row.get::<_, i64>(2)? as u64,
-                is_directory: row.get(3)?,
-                sync_status: row.get(4)?,
-                last_sync_time: row.get::<_, Option<i64>>(5)?.map(|t| t as u64),
-                remote_id: row.get(6)?,
-            })
-        })?;
-        
-        rows.collect()
-    }
-    
-    /// 查询特定状态的文件
-    pub fn find_by_status(&self, status: &str) -> SqlResult<Vec<FileMetaInfo>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT path, size, modified_time, is_directory, sync_status, last_sync_time, remote_id
-             FROM files WHERE sync_status = ?1"
-        )?;
-        
-        let rows = stmt.query_map(params![status], |row| {
-            Ok(FileMetaInfo {
-                path: row.get(0)?,
-                size: row.get::<_, i64>(1)? as u64,
-                modified_time: row.get::<_, i64>(2)? as u64,
-                is_directory: row.get(3)?,
-                sync_status: row.get(4)?,
-                last_sync_time: row.get::<_, Option<i64>>(5)?.map(|t| t as u64),
-                remote_id: row.get(6)?,
-            })
-        })?;
-        
-        rows.collect()
-    }
-    
-    /// 保存同步历史
-    pub fn save_sync_history(&self, history: &SyncHistory) -> SqlResult<()> {
-        self.conn.execute(
-            "INSERT OR REPLACE INTO sync_history 
-             (sync_time, cloud_provider, downloaded, uploaded, deleted, errors, duration_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                history.sync_time as i64,
-                &history.cloud_provider,
-                history.downloaded as i64,
-                history.uploaded as i64,
-                history.deleted as i64,
-                history.errors as i64,
-                history.duration_ms as i64,
-            ],
-        )?;
-        Ok(())
-    }
-    
-    /// 清空所有元数据
-    pub fn clear_all(&self) -> SqlResult<()> {
-        self.conn.execute("DELETE FROM files", [])?;
-        self.conn.execute("DELETE FROM sync_history", [])?;
-        Ok(())
-    }
-}
 ```
 
 **依赖添加：**
