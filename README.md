@@ -60,7 +60,7 @@ graph TB
 
 ### 3.1 OAuth 授权流程概述
 
-本库**不负责**处理 OAuth 授权流程，所有的认证和 token 管理由**调用应用**负责。这是一个清晰的职责分离设计，使得库保持简洁和专注于核心的多设备文件同步功能。应用可以根据自己的需求，在不同设备上独立完成授权，然后使用本库实现跨设备的文件同步。
+本库**不负责**处理 OAuth 授权流程，所有的认证和 token 管理由**调用应用**负责。这是一个清晰的职责分离设计，使得库保持简洁和专注于核心的多设备文件同步功能。应用可以根据自己的需求完成 OAuth 授权，然后使用本库实现跨设备的文件同步。
 
 ### 3.2 应用侧的 OAuth 授权流程
 
@@ -147,15 +147,6 @@ sequenceDiagram
 | 文件同步 | **本库 (Omnitree)** | 库使用传入的 token 执行文件同步操作 |
 | Token 验证 | **本库 (Omnitree)** | 库在使用 token 时会验证其有效性（通过 API 调用） |
 
-### 3.6 设计优势
-
-这种职责分离的设计带来以下优势：
-
-- ✅ **职责清晰**：认证和同步逻辑分离，库专注于多设备文件同步核心功能
-- ✅ **灵活性高**：应用可以自定义认证流程和 UI，适配不同平台和用户体验需求
-- ✅ **多设备友好**：每个设备独立授权，互不干扰，用户可在不同设备上使用不同云盘账号
-- ✅ **安全性好**：敏感的 Client Secret 由应用管理，不需要传入库，降低安全风险
-- ✅ **可测试性强**：可以使用 mock token 独立测试同步功能，无需真实的 OAuth 流程
 
 ## 4. 同步流程设计
 
@@ -215,17 +206,14 @@ flowchart TD
     CheckLocal -->|是| CheckRemote2{云盘存在?}
     CheckRemote2 -->|否| Upload[上传文件]
     
-    CheckRemote2 -->|是| CompareHash{哈希值相同?}
-    CompareHash -->|是| UpdateMeta[仅更新元数据]
-    
-    CompareHash -->|否| CompareTime{比较修改时间}
+    CheckRemote2 -->|是| CompareTime{比较修改时间}
     CompareTime -->|本地较新| Upload[上传覆盖云盘文件]
     CompareTime -->|云盘较新| Download[下载覆盖本地文件]
-    CompareTime -->|时间相同| UpdateMeta
+    CompareTime -->|时间相同| Skip[跳过同步]
     
     Download --> End2[结束]
     Upload --> End2
-    UpdateMeta --> End2
+    Skip --> End2
     End1 --> End2
 ```
 
@@ -573,252 +561,12 @@ pub enum SyncStatus {
 
 ### 6.1 元数据存储方案
 
-本库提供多种元数据存储方案，可根据项目需求选择：
+本库使用 **SQLite** 作为元数据存储方案，它提供了功能强大、成熟稳定的数据库能力。
 
-#### 6.1.1 方案对比
-
-| 方案 | 优点 | 缺点 | 适用场景 |
-|------|------|------|----------|
-| **JSON 文件** | 极简单，无依赖，易调试 | 大量文件时性能差，无索引 | 小型项目（<1000 文件） |
-| **MessagePack** | 二进制紧凑，性能好 | 不可直接查看 | 中小型项目（<10000 文件） |
-| **sled** | 嵌入式KV数据库，无SQL，快速 | 生态较新，API 简单 | 推荐，平衡性能和复杂度 |
-| **SQLite** | 功能强大，复杂查询，成熟稳定 | 依赖较重，过于复杂 | 大型项目，需要复杂查询 |
-
-#### 6.1.2 推荐方案：sled（轻量级嵌入式数据库）
-
-**sled** 是一个嵌入式 KV 数据库，非常适合本项目：
-
-```rust
-use sled::{Db, IVec};
-use serde::{Serialize, Deserialize};
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct FileMetaInfo {
-    pub path: String,
-    pub size: u64,
-    pub modified_time: u64,
-    pub hash: String,
-    pub is_directory: bool,
-    pub sync_status: String,
-    pub last_sync_time: Option<u64>,
-    pub remote_id: Option<String>,
-}
-
-pub struct MetadataStore {
-    db: Db,
-}
-
-impl MetadataStore {
-    /// 打开或创建元数据存储
-    pub fn open(path: &Path) -> Result<Self, Error> {
-        let db = sled::open(path)?;
-        Ok(Self { db })
-    }
-    
-    /// 保存文件元数据
-    pub fn save_file_meta(&self, path: &str, meta: &FileMetaInfo) -> Result<(), Error> {
-        let key = path.as_bytes();
-        let value = bincode::serialize(meta)?;
-        self.db.insert(key, value)?;
-        Ok(())
-    }
-    
-    /// 获取文件元数据
-    pub fn get_file_meta(&self, path: &str) -> Result<Option<FileMetaInfo>, Error> {
-        let key = path.as_bytes();
-        match self.db.get(key)? {
-            Some(bytes) => {
-                let meta: FileMetaInfo = bincode::deserialize(&bytes)?;
-                Ok(Some(meta))
-            }
-            None => Ok(None),
-        }
-    }
-    
-    /// 删除文件元数据
-    pub fn delete_file_meta(&self, path: &str) -> Result<(), Error> {
-        self.db.remove(path.as_bytes())?;
-        Ok(())
-    }
-    
-    /// 列出所有文件元数据
-    pub fn list_all(&self) -> Result<Vec<FileMetaInfo>, Error> {
-        let mut files = Vec::new();
-        for item in self.db.iter() {
-            let (_, value) = item?;
-            let meta: FileMetaInfo = bincode::deserialize(&value)?;
-            files.push(meta);
-        }
-        Ok(files)
-    }
-    
-    /// 查询特定状态的文件
-    pub fn find_by_status(&self, status: &str) -> Result<Vec<FileMetaInfo>, Error> {
-        let mut files = Vec::new();
-        for item in self.db.iter() {
-            let (_, value) = item?;
-            let meta: FileMetaInfo = bincode::deserialize(&value)?;
-            if meta.sync_status == status {
-                files.push(meta);
-            }
-        }
-        Ok(files)
-    }
-    
-    /// 保存同步历史（使用带前缀的key）
-    pub fn save_sync_history(&self, history: &SyncHistory) -> Result<(), Error> {
-        let key = format!("history:{}", history.sync_time);
-        let value = bincode::serialize(history)?;
-        self.db.insert(key.as_bytes(), value)?;
-        Ok(())
-    }
-    
-    /// 清空所有元数据
-    pub fn clear_all(&self) -> Result<(), Error> {
-        self.db.clear()?;
-        Ok(())
-    }
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct SyncHistory {
-    pub sync_time: u64,
-    pub cloud_provider: String,
-    pub downloaded: usize,
-    pub uploaded: usize,
-    pub deleted: usize,
-    pub errors: usize,
-    pub duration_ms: u64,
-}
-```
-
-**依赖添加：**
-```toml
-[dependencies]
-sled = "0.34"           # 嵌入式 KV 数据库
-bincode = "1.3"         # 二进制序列化
-```
-
-#### 6.1.3 备选方案1：JSON 文件（最轻量）
-
-适合文件数量少的小型项目：
-
-```rust
-use serde::{Serialize, Deserialize};
-use std::collections::HashMap;
-use std::fs;
-use std::path::Path;
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct MetadataCache {
-    pub files: HashMap<String, FileMetaInfo>,
-    pub last_sync: Option<u64>,
-    pub sync_history: Vec<SyncHistory>,
-}
-
-impl MetadataCache {
-    /// 从 JSON 文件加载
-    pub fn load(path: &Path) -> Result<Self, Error> {
-        if path.exists() {
-            let content = fs::read_to_string(path)?;
-            let cache: MetadataCache = serde_json::from_str(&content)?;
-            Ok(cache)
-        } else {
-            Ok(Self::default())
-        }
-    }
-    
-    /// 保存到 JSON 文件
-    pub fn save(&self, path: &Path) -> Result<(), Error> {
-        let content = serde_json::to_string_pretty(self)?;
-        fs::write(path, content)?;
-        Ok(())
-    }
-    
-    /// 获取文件元数据
-    pub fn get_file_meta(&self, path: &str) -> Option<&FileMetaInfo> {
-        self.files.get(path)
-    }
-    
-    /// 设置文件元数据
-    pub fn set_file_meta(&mut self, path: String, meta: FileMetaInfo) {
-        self.files.insert(path, meta);
-    }
-    
-    /// 删除文件元数据
-    pub fn remove_file_meta(&mut self, path: &str) {
-        self.files.remove(path);
-    }
-}
-
-impl Default for MetadataCache {
-    fn default() -> Self {
-        Self {
-            files: HashMap::new(),
-            last_sync: None,
-            sync_history: Vec::new(),
-        }
-    }
-}
-```
-
-**依赖添加：**
-```toml
-[dependencies]
-serde_json = "1.0"      # JSON 序列化（已有）
-```
-
-#### 6.1.4 备选方案2：MessagePack（更紧凑的二进制格式）
-
-比 JSON 更快、更小：
-
-```rust
-use rmp_serde as rmps;
-
-pub struct MetadataStore {
-    cache: MetadataCache,
-    file_path: PathBuf,
-}
-
-impl MetadataStore {
-    pub fn load(path: PathBuf) -> Result<Self, Error> {
-        let cache = if path.exists() {
-            let bytes = fs::read(&path)?;
-            rmps::from_slice(&bytes)?
-        } else {
-            MetadataCache::default()
-        };
-        
-        Ok(Self { cache, file_path: path })
-    }
-    
-    pub fn save(&self) -> Result<(), Error> {
-        let bytes = rmps::to_vec(&self.cache)?;
-        fs::write(&self.file_path, bytes)?;
-        Ok(())
-    }
-    
-    // 其他方法与 JSON 方案类似
-}
-```
-
-**依赖添加：**
-```toml
-[dependencies]
-rmp-serde = "1.1"       # MessagePack 序列化
-```
-
-#### 6.1.5 方案3：SQLite（功能最强大）
-
-如果需要复杂查询或超大文件量：
-
-```sql
--- 文件元数据表
-CREATE TABLE files (
+#### 6.1.1 数据库 Schemales (
     path TEXT PRIMARY KEY NOT NULL,
     size INTEGER NOT NULL,
     modified_time INTEGER NOT NULL,
-    hash TEXT NOT NULL,
     is_directory BOOLEAN NOT NULL,
     sync_status TEXT NOT NULL,
     last_sync_time INTEGER,
@@ -841,61 +589,202 @@ CREATE INDEX idx_sync_status ON files(sync_status);
 CREATE INDEX idx_modified_time ON files(modified_time);
 ```
 
+#### 6.1.2 实现示例
+
+```rust
+use rusqlite::{Connection, Result as SqlResult, params};
+use serde::{Serialize, Deserialize};
+
+#[derive(Debug, Clone)]
+pub struct FileMetaInfo {
+    pub path: String,
+    pub size: u64,
+    pub modified_time: u64,
+    pub is_directory: bool,
+    pub sync_status: String,
+    pub last_sync_time: Option<u64>,
+    pub remote_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SyncHistory {
+    pub sync_time: u64,
+    pub cloud_provider: String,
+    pub downloaded: usize,
+    pub uploaded: usize,
+    pub deleted: usize,
+    pub errors: usize,
+    pub duration_ms: u64,
+}
+
+pub struct MetadataStore {
+    conn: Connection,
+}
+
+impl MetadataStore {
+    /// 打开或创建数据库
+    pub fn open(db_path: &Path) -> SqlResult<Self> {
+        let conn = Connection::open(db_path)?;
+        let store = Self { conn };
+        store.init_schema()?;
+        Ok(store)
+    }
+    
+    /// 初始化数据库 schema
+    fn init_schema(&self) -> SqlResult<()> {
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS files (
+                path TEXT PRIMARY KEY NOT NULL,
+                size INTEGER NOT NULL,
+                modified_time INTEGER NOT NULL,
+                is_directory BOOLEAN NOT NULL,
+                sync_status TEXT NOT NULL,
+                last_sync_time INTEGER,
+                remote_id TEXT
+            );
+            
+            CREATE TABLE IF NOT EXISTS sync_history (
+                sync_time INTEGER PRIMARY KEY,
+                cloud_provider TEXT NOT NULL,
+                downloaded INTEGER NOT NULL,
+                uploaded INTEGER NOT NULL,
+                deleted INTEGER NOT NULL,
+                errors INTEGER NOT NULL,
+                duration_ms INTEGER NOT NULL
+            );
+            
+            CREATE INDEX IF NOT EXISTS idx_sync_status ON files(sync_status);
+            CREATE INDEX IF NOT EXISTS idx_modified_time ON files(modified_time);"
+        )?;
+        Ok(())
+    }
+    
+    /// 保存文件元数据
+    pub fn save_file_meta(&self, meta: &FileMetaInfo) -> SqlResult<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO files 
+             (path, size, modified_time, is_directory, sync_status, last_sync_time, remote_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                &meta.path,
+                meta.size as i64,
+                meta.modified_time as i64,
+                meta.is_directory,
+                &meta.sync_status,
+                meta.last_sync_time.map(|t| t as i64),
+                &meta.remote_id,
+            ],
+        )?;
+        Ok(())
+    }
+    
+    /// 获取文件元数据
+    pub fn get_file_meta(&self, path: &str) -> SqlResult<Option<FileMetaInfo>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT path, size, modified_time, is_directory, sync_status, last_sync_time, remote_id
+             FROM files WHERE path = ?1"
+        )?;
+        
+        let mut rows = stmt.query(params![path])?;
+        
+        if let Some(row) = rows.next()? {
+            Ok(Some(FileMetaInfo {
+                path: row.get(0)?,
+                size: row.get::<_, i64>(1)? as u64,
+                modified_time: row.get::<_, i64>(2)? as u64,
+                is_directory: row.get(3)?,
+                sync_status: row.get(4)?,
+                last_sync_time: row.get::<_, Option<i64>>(5)?.map(|t| t as u64),
+                remote_id: row.get(6)?,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+    
+    /// 删除文件元数据
+    pub fn delete_file_meta(&self, path: &str) -> SqlResult<()> {
+        self.conn.execute("DELETE FROM files WHERE path = ?1", params![path])?;
+        Ok(())
+    }
+    
+    /// 列出所有文件元数据
+    pub fn list_all(&self) -> SqlResult<Vec<FileMetaInfo>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT path, size, modified_time, is_directory, sync_status, last_sync_time, remote_id
+             FROM files"
+        )?;
+        
+        let rows = stmt.query_map([], |row| {
+            Ok(FileMetaInfo {
+                path: row.get(0)?,
+                size: row.get::<_, i64>(1)? as u64,
+                modified_time: row.get::<_, i64>(2)? as u64,
+                is_directory: row.get(3)?,
+                sync_status: row.get(4)?,
+                last_sync_time: row.get::<_, Option<i64>>(5)?.map(|t| t as u64),
+                remote_id: row.get(6)?,
+            })
+        })?;
+        
+        rows.collect()
+    }
+    
+    /// 查询特定状态的文件
+    pub fn find_by_status(&self, status: &str) -> SqlResult<Vec<FileMetaInfo>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT path, size, modified_time, is_directory, sync_status, last_sync_time, remote_id
+             FROM files WHERE sync_status = ?1"
+        )?;
+        
+        let rows = stmt.query_map(params![status], |row| {
+            Ok(FileMetaInfo {
+                path: row.get(0)?,
+                size: row.get::<_, i64>(1)? as u64,
+                modified_time: row.get::<_, i64>(2)? as u64,
+                is_directory: row.get(3)?,
+                sync_status: row.get(4)?,
+                last_sync_time: row.get::<_, Option<i64>>(5)?.map(|t| t as u64),
+                remote_id: row.get(6)?,
+            })
+        })?;
+        
+        rows.collect()
+    }
+    
+    /// 保存同步历史
+    pub fn save_sync_history(&self, history: &SyncHistory) -> SqlResult<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO sync_history 
+             (sync_time, cloud_provider, downloaded, uploaded, deleted, errors, duration_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                history.sync_time as i64,
+                &history.cloud_provider,
+                history.downloaded as i64,
+                history.uploaded as i64,
+                history.deleted as i64,
+                history.errors as i64,
+                history.duration_ms as i64,
+            ],
+        )?;
+        Ok(())
+    }
+    
+    /// 清空所有元数据
+    pub fn clear_all(&self) -> SqlResult<()> {
+        self.conn.execute("DELETE FROM files", [])?;
+        self.conn.execute("DELETE FROM sync_history", [])?;
+        Ok(())
+    }
+}
+```
+
 **依赖添加：**
 ```toml
 [dependencies]
 rusqlite = { version = "0.30", features = ["bundled"] }
 ```
-
-#### 6.1.6 推荐配置
-
-默认使用 **sled**，提供配置选项让用户选择：
-
-```rust
-#[derive(Debug, Clone)]
-pub enum MetadataBackend {
-    /// 推荐：sled 嵌入式数据库（默认）
-    Sled,
-    /// 轻量：JSON 文件（小型项目）
-    Json,
-    /// 紧凑：MessagePack 二进制格式
-    MessagePack,
-    /// 强大：SQLite 数据库（大型项目）
-    Sqlite,
-}
-
-pub struct SyncConfig {
-    pub local_root: PathBuf,
-    pub remote_root: String,
-    pub incremental: bool,
-    pub ignore_patterns: Vec<String>,
-    /// 元数据存储后端（默认：Sled）
-    pub metadata_backend: MetadataBackend,
-}
-
-impl Default for SyncConfig {
-    fn default() -> Self {
-        Self {
-            // ... 其他字段
-            metadata_backend: MetadataBackend::Sled,  // 默认使用 sled
-        }
-    }
-}
-```
-
-#### 6.1.7 性能对比
-
-基于 10000 个文件的测试：
-
-| 操作 | JSON | MessagePack | sled | SQLite |
-|------|------|-------------|------|--------|
-| 写入全部 | ~500ms | ~200ms | ~150ms | ~300ms |
-| 读取全部 | ~300ms | ~100ms | ~80ms | ~200ms |
-| 单个查询 | ~50ms | ~20ms | ~1ms | ~5ms |
-| 条件查询 | ~100ms | ~50ms | ~30ms | ~10ms |
-| 文件大小 | 5MB | 2MB | 3MB | 4MB |
-
-**结论：推荐使用 sled 作为默认方案**，它在性能、简单性和功能之间取得了最好的平衡。
 
 ### 6.2 云盘适配器接口
 
@@ -1070,59 +959,7 @@ let result2 = sync_lib.sync_async(&icloud_creds).await?;
 println!("iCloud 同步完成 - Apple 生态设备间同步");
 ```
 
-## 8. 技术栈
-
-### 8.1 核心依赖
-
-```toml
-[dependencies]
-# 异步运行时
-tokio = { version = "1.35", features = ["full"] }
-async-trait = "0.1"
-
-# HTTP 客户端
-reqwest = { version = "0.11", features = ["json", "stream"] }
-
-# 序列化
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-
-# 元数据存储（推荐：选择其一）
-sled = "0.34"                                    # 推荐：嵌入式 KV 数据库
-bincode = "1.3"                                  # 二进制序列化
-# rmp-serde = "1.1"                              # 备选：MessagePack
-# rusqlite = { version = "0.30", features = ["bundled"] }  # 备选：SQLite
-
-# 加密和哈希
-sha2 = "0.10"
-aes-gcm = "0.10"
-
-# 错误处理
-thiserror = "1.0"
-anyhow = "1.0"
-
-# 文件监控（可选，用于自动同步）
-notify = "6.1"
-
-# 日志
-log = "0.4"
-env_logger = "0.11"
-
-# 时间处理
-chrono = "0.4"
-
-# 路径处理
-path-clean = "1.0"
-
-# OAuth 客户端（针对不同云盘）
-oauth2 = "4.4"
-
-# 云盘 SDK
-# onedrive-api = "..." # 需要选择合适的 crate
-# google-drive-api = "..."
-```
-
-### 8.2 项目结构
+## 8. 项目结构
 
 ```
 omnitree/
@@ -1197,157 +1034,3 @@ omnitree/
 - 使用 tokio 进行异步 I/O
 - 限制并发下载/上传数量（避免 API 限流）
 - 批量操作减少 API 调用次数
-
-### 10.3 缓存策略
-- 缓存目录列表（带过期时间）
-- 缓存文件元数据
-- 使用连接池复用 HTTP 连接
-
-## 11. 错误处理策略
-
-### 11.1 错误分类
-- **可恢复错误**：网络超时、临时性 API 错误 → 自动重试
-- **不可恢复错误**：认证失败、权限不足 → 立即返回错误
-- **部分失败**：某些文件同步失败 → 继续其他文件，最后汇总错误
-
-### 11.2 重试机制
-```rust
-// 指数退避重试
-async fn retry_with_backoff<F, T>(
-    mut operation: F,
-    max_retries: u32,
-) -> Result<T, Error>
-where
-    F: FnMut() -> BoxFuture<'static, Result<T, Error>>,
-{
-    let mut retries = 0;
-    loop {
-        match operation().await {
-            Ok(result) => return Ok(result),
-            Err(e) if retries < max_retries && e.is_retryable() => {
-                retries += 1;
-                let delay = Duration::from_secs(2u64.pow(retries));
-                tokio::time::sleep(delay).await;
-            }
-            Err(e) => return Err(e),
-        }
-    }
-}
-```
-
-## 12. 测试策略
-
-### 12.1 单元测试
-- 文件操作测试
-- 哈希计算测试
-- 差异计算测试
-- 时间戳比较逻辑测试
-
-### 12.2 集成测试
-- 模拟云盘 API（使用 mock server）
-- 完整同步流程测试
-- 不同时间戳场景测试
-
-### 12.3 性能测试
-- 大量文件同步性能
-- 大文件传输性能
-- 并发操作压力测试
-
-## 13. 文档和维护
-
-### 13.1 API 文档
-使用 Rust doc 生成完整的 API 文档：
-```bash
-cargo doc --open
-```
-
-### 13.2 版本管理
-遵循语义化版本（Semantic Versioning）：
-- **主版本号**：不兼容的 API 修改
-- **次版本号**：向后兼容的功能新增
-- **修订号**：向后兼容的问题修正
-
-### 13.3 更新日志
-维护 CHANGELOG.md 记录每个版本的变更。
-
-## 14. 未来扩展
-
-### 14.1 短期计划
-- [ ] 实现三个主要云盘适配器（iCloud、OneDrive、Google Drive）
-- [ ] 完善错误处理和重试机制
-- [ ] 添加详细的日志记录
-- [ ] 编写完整的单元测试和集成测试
-
-### 14.2 中期计划
-- [ ] 支持文件版本历史
-- [ ] 实现自动同步（监控文件变化）
-- [ ] 支持选择性同步（只同步特定目录）
-- [ ] 添加加密传输选项
-- [ ] 支持 Dropbox 等其他云盘
-
-### 14.3 长期计划
-- [ ] 图形界面工具（GUI）
-- [ ] 移动端支持
-- [ ] 点对点同步（无需云盘）
-- [ ] 文件版本历史查看
-- [ ] 团队协作功能（共享目录）
-
-## 15. 许可证
-
-建议使用 MIT 或 Apache-2.0 双许可证，方便商业使用。
-
-## 16. 贡献指南
-
-欢迎社区贡献！请遵循以下流程：
-1. Fork 项目仓库
-2. 创建特性分支 (`git checkout -b feature/AmazingFeature`)
-3. 提交更改 (`git commit -m 'Add some AmazingFeature'`)
-4. 推送到分支 (`git push origin feature/AmazingFeature`)
-5. 开启 Pull Request
-
----
-
-## 附录 A：云盘 API 对比
-
-| 功能 | iCloud | OneDrive | Google Drive |
-|------|--------|----------|--------------|
-| OAuth 2.0 | ✓ | ✓ | ✓ |
-| 文件上传 | ✓ | ✓ | ✓ |
-| 文件下载 | ✓ | ✓ | ✓ |
-| 增量同步 | ✓ | ✓ (Delta API) | ✓ (Changes API) |
-| 文件版本 | ✓ | ✓ | ✓ |
-| 文件哈希 | ✓ | ✓ (QuickXorHash) | ✓ (MD5) |
-| 免费存储 | 5GB | 5GB | 15GB |
-| API 限流 | 较少文档 | 详细限流规则 | 详细限流规则 |
-
-## 附录 B：常见问题
-
-### Q1: 如何处理令牌过期？
-A: 应用应该使用 refresh token 自动刷新 access token，库不负责令牌刷新。
-
-### Q2: 支持哪些操作系统？
-A: Windows、macOS、Linux 均支持。
-
-### Q3: 如何处理大文件？
-A: 使用分块上传/下载，支持断点续传。
-
-### Q4: 是否支持实时同步？
-A: 当前版本需应用主动调用同步方法，这样可以让应用控制同步时机，避免频繁的网络操作。未来版本将支持文件监控和自动同步功能，实现近实时的多设备同步体验。
-
-### Q5: 如何处理网络中断？
-A: 自动重试机制，支持断点续传，网络恢复后继续同步。
-
-### Q6: 多个设备同时修改同一文件会怎样？
-A: 基于文件的最后修改时间，最新的修改会覆盖旧版本。建议应用在写入文件前先执行同步，获取最新版本，避免数据丢失。
-
-### Q7: 需要自建服务器吗？
-A: 不需要。本库依托现有的云盘服务（iCloud、OneDrive、Google Drive）作为存储后端，无需额外的服务器成本。
-
-### Q8: 适合什么样的应用场景？
-A: 适合需要在多设备间同步用户数据的应用，如笔记应用、文档编辑器、个人知识管理工具等。特别适合用户数据不太大（GB级别以内）但需要跨设备访问的场景。
-
----
-
-**文档版本**: 1.0  
-**最后更新**: 2025-12-16  
-**作者**: Omnitree Team
