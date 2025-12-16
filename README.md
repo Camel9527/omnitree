@@ -1,4 +1,4 @@
-# 云盘同步库设计文档
+# Omnitree 设计文档
 
 ## 1. 概述
 
@@ -27,7 +27,7 @@
 
 ```mermaid
 graph TB
-    App[应用程序] --> API[CloudSyncLib API]
+    App[应用程序] --> API[Omnitree API]
     API --> LocalFS[本地文件系统管理]
     API --> SyncEngine[同步引擎]
     
@@ -164,7 +164,7 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     participant App as 应用程序
-    participant Lib as CloudSyncLib
+    participant Lib as Omnitree
     participant Local as 本地文件系统
     participant Cloud as 云盘服务
     
@@ -332,14 +332,14 @@ pub struct FileMetadata {
 ### 5.2 主要 API
 
 ```rust
-/// 云盘同步库主结构体
-pub struct CloudSyncLib {
+/// Omnitree 主结构体
+pub struct Omnitree {
     config: SyncConfig,
     metadata_db: MetadataDatabase,
     sync_engine: SyncEngine,
 }
 
-impl CloudSyncLib {
+impl Omnitree {
     /// 创建新的库实例
     /// 
     /// # 参数
@@ -971,8 +971,8 @@ pub fn calculate_file_hash(path: &Path) -> Result<String, Error> {
 ### 7.1 基本使用流程
 
 ```rust
-use cloud_sync_lib::{
-    CloudSyncLib, SyncConfig, CloudCredentials, CloudProvider
+use omnitree::{
+    Omnitree, SyncConfig, CloudCredentials, CloudProvider
 };
 use std::path::PathBuf;
 
@@ -991,7 +991,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // 2. 创建库实例
-    let mut sync_lib = CloudSyncLib::new(config)?;
+    let mut sync_lib = Omnitree::new(config)?;
 
     // 3. 初始化（首次使用）
     sync_lib.initialize()?;
@@ -1032,12 +1032,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 // 场景：用户在电脑 A 上修改文件，在电脑 B 上同步下来
 
 // 电脑 A：修改文件并同步到云盘
-let mut sync_lib_a = CloudSyncLib::new(config_a)?;
+let mut sync_lib_a = Omnitree::new(config_a)?;
 sync_lib_a.write_file("document.txt", b"Updated content")?
 sync_lib_a.sync_async(&credentials).await?;  // 上传到云盘
 
 // 电脑 B：从云盘同步最新文件
-let mut sync_lib_b = CloudSyncLib::new(config_b)?;
+let mut sync_lib_b = Omnitree::new(config_b)?;
 sync_lib_b.sync_async(&credentials).await?;  // 下载最新版本
 let content = sync_lib_b.read_file_to_string("document.txt")?;
 assert_eq!(content, "Updated content");  // 获得电脑 A 的更改
@@ -1125,7 +1125,7 @@ oauth2 = "4.4"
 ### 8.2 项目结构
 
 ```
-cloud-sync-lib/
+omnitree/
 ├── Cargo.toml
 ├── src/
 │   ├── lib.rs                 # 库入口，导出公共 API
@@ -1350,4 +1350,4 @@ A: 适合需要在多设备间同步用户数据的应用，如笔记应用、�
 
 **文档版本**: 1.0  
 **最后更新**: 2025-12-16  
-**作者**: Cloud Sync Library Team
+**作者**: Omnitree Team
