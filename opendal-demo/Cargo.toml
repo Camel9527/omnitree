@@ -1,0 +1,47 @@
+[package]
+name = "opendal-gdrive-demo"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opendal = { version = "0.51", features = ["services-gdrive"] }
+tokio = { version = "1.42", features = ["full"] }
+anyhow = "1.0"
+serde_json = "1.0"
+chrono = "0.4"
+
+[[bin]]
+name = "gdrive-basic"
+path = "src/basic.rs"
+
+[[bin]]
+name = "gdrive-upload"
+path = "src/upload.rs"
+
+[[bin]]
+name = "gdrive-download"
+path = "src/download.rs"
+
+[[bin]]
+name = "gdrive-list"
+path = "src/list.rs"
+
+[[bin]]
+name = "gdrive-delete"
+path = "src/delete.rs"
+
+[[bin]]
+name = "gdrive-copy"
+path = "src/copy.rs"
+
+[[bin]]
+name = "gdrive-rename"
+path = "src/rename.rs"
+
+[[bin]]
+name = "gdrive-stat"
+path = "src/stat.rs"
+
+[[bin]]
+name = "gdrive-complete"
+path = "src/complete_demo.rs"
