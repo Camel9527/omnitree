@@ -100,357 +100,42 @@ sequenceDiagram
     CloudAPI->>App: API 响应
 ```
 
-### 3.3 各云盘的 OAuth 配置
+### 3.3 各云盘的 OAuth 参数
 
-#### 3.3.1 OneDrive OAuth 配置
+调用应用需要在各云盘平台注册应用以获取 OAuth 配置参数：
 
-```rust
-// 示例：OneDrive OAuth 参数
-const ONEDRIVE_AUTH_URL: &str = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize";
-const ONEDRIVE_TOKEN_URL: &str = "https://login.microsoftonline.com/common/oauth2/v2.0/token";
-const ONEDRIVE_SCOPES: &[&str] = &["Files.ReadWrite", "offline_access"];
+#### 3.3.1 OneDrive
+- **注册平台**: Azure Portal
+- **授权端点**: `https://login.microsoftonline.com/common/oauth2/v2.0/authorize`
+- **令牌端点**: `https://login.microsoftonline.com/common/oauth2/v2.0/token`
+- **所需权限**: `Files.ReadWrite`, `offline_access`
+- **需要配置**: Client ID, Client Secret (可选), Redirect URI
 
-// 应用需要在 Azure Portal 注册获取
-struct OneDriveConfig {
-    client_id: String,      // 应用 ID
-    client_secret: String,  // 应用密钥（可选，使用 PKCE 时不需要）
-    redirect_uri: String,   // 重定向 URI
-}
-```
+#### 3.3.2 Google Drive
+- **注册平台**: Google Cloud Console
+- **授权端点**: `https://accounts.google.com/o/oauth2/v2/auth`
+- **令牌端点**: `https://oauth2.googleapis.com/token`
+- **所需权限**: `https://www.googleapis.com/auth/drive.file`, `https://www.googleapis.com/auth/drive.appdata`
+- **需要配置**: Client ID, Client Secret, Redirect URI
 
-#### 3.3.2 Google Drive OAuth 配置
+#### 3.3.3 iCloud
+- **注册平台**: Apple Developer
+- **授权端点**: `https://appleid.apple.com/auth/authorize`
+- **令牌端点**: `https://appleid.apple.com/auth/token`
+- **所需权限**: `name`, `email`
+- **需要配置**: Services ID, Team ID, Key ID, Private Key, Redirect URI
 
-```rust
-// 示例：Google Drive OAuth 参数
-const GDRIVE_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
-const GDRIVE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
-const GDRIVE_SCOPES: &[&str] = &[
-    "https://www.googleapis.com/auth/drive.file",
-    "https://www.googleapis.com/auth/drive.appdata"
-];
+### 3.4 Token 管理要点
 
-// 应用需要在 Google Cloud Console 注册获取
-struct GoogleDriveConfig {
-    client_id: String,
-    client_secret: String,
-    redirect_uri: String,
-}
-```
+应用侧需要实现以下 token 管理功能：
 
-#### 3.3.3 iCloud OAuth 配置
+1. **安全存储**: 使用系统密钥链（macOS Keychain、Windows Credential Manager、Linux Secret Service）存储 token
+2. **过期检测**: 定期检查 token 是否过期或即将过期
+3. **自动刷新**: 使用 refresh token 在 access token 过期前自动刷新（建议提前5分钟）
+4. **刷新失败处理**: 当 refresh token 失效时，引导用户重新授权
+5. **安全清理**: 用户登出时安全删除存储的 token
 
-```rust
-// 示例：iCloud OAuth 参数
-const ICLOUD_AUTH_URL: &str = "https://appleid.apple.com/auth/authorize";
-const ICLOUD_TOKEN_URL: &str = "https://appleid.apple.com/auth/token";
-const ICLOUD_SCOPES: &[&str] = &["name", "email"];
-
-// 应用需要在 Apple Developer 注册获取
-struct ICloudConfig {
-    client_id: String,      // Services ID
-    team_id: String,        // Team ID
-    key_id: String,         // Key ID
-    private_key: String,    // 私钥
-    redirect_uri: String,
-}
-```
-
-### 3.4 Token 存储与管理
-
-应用需要安全地存储和管理获取到的 token：
-
-```rust
-use keyring::Entry;
-use serde::{Deserialize, Serialize};
-use std::time::{SystemTime, Duration};
-
-/// Token 信息（应用侧管理）
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TokenInfo {
-    /// 访问令牌
-    pub access_token: String,
-    /// 刷新令牌
-    pub refresh_token: Option<String>,
-    /// 过期时间
-    pub expires_at: SystemTime,
-    /// 云盘提供商
-    pub provider: String,
-    /// 用户标识
-    pub user_id: String,
-}
-
-/// Token 管理器（应用侧实现）
-pub struct TokenManager {
-    app_name: String,
-}
-
-impl TokenManager {
-    pub fn new(app_name: &str) -> Self {
-        Self {
-            app_name: app_name.to_string(),
-        }
-    }
-    
-    /// 保存 token 到系统密钥链
-    pub fn save_token(&self, user_id: &str, provider: &str, token: &TokenInfo) -> Result<(), Error> {
-        let key = format!("{}:{}:{}", self.app_name, provider, user_id);
-        let entry = Entry::new(&self.app_name, &key)?;
-        let token_json = serde_json::to_string(token)?;
-        entry.set_password(&token_json)?;
-        Ok(())
-    }
-    
-    /// 从系统密钥链读取 token
-    pub fn load_token(&self, user_id: &str, provider: &str) -> Result<TokenInfo, Error> {
-        let key = format!("{}:{}:{}", self.app_name, provider, user_id);
-        let entry = Entry::new(&self.app_name, &key)?;
-        let token_json = entry.get_password()?;
-        let token: TokenInfo = serde_json::from_str(&token_json)?;
-        Ok(token)
-    }
-    
-    /// 删除 token
-    pub fn delete_token(&self, user_id: &str, provider: &str) -> Result<(), Error> {
-        let key = format!("{}:{}:{}", self.app_name, provider, user_id);
-        let entry = Entry::new(&self.app_name, &key)?;
-        entry.delete_password()?;
-        Ok(())
-    }
-    
-    /// 检查 token 是否过期
-    pub fn is_token_expired(&self, token: &TokenInfo) -> bool {
-        SystemTime::now() >= token.expires_at
-    }
-    
-    /// 刷新 token（需要调用云盘 API）
-    pub async fn refresh_token(&self, token: &TokenInfo) -> Result<TokenInfo, Error> {
-        // 根据不同的 provider 调用相应的刷新 API
-        match token.provider.as_str() {
-            "OneDrive" => self.refresh_onedrive_token(token).await,
-            "GoogleDrive" => self.refresh_gdrive_token(token).await,
-            "iCloud" => self.refresh_icloud_token(token).await,
-            _ => Err(Error::UnsupportedProvider),
-        }
-    }
-    
-    async fn refresh_onedrive_token(&self, token: &TokenInfo) -> Result<TokenInfo, Error> {
-        // 实现 OneDrive token 刷新逻辑
-        // POST https://login.microsoftonline.com/common/oauth2/v2.0/token
-        // 参数：refresh_token, client_id, grant_type=refresh_token
-        todo!("实现 OneDrive token 刷新")
-    }
-    
-    async fn refresh_gdrive_token(&self, token: &TokenInfo) -> Result<TokenInfo, Error> {
-        // 实现 Google Drive token 刷新逻辑
-        // POST https://oauth2.googleapis.com/token
-        // 参数：refresh_token, client_id, client_secret, grant_type=refresh_token
-        todo!("实现 Google Drive token 刷新")
-    }
-    
-    async fn refresh_icloud_token(&self, token: &TokenInfo) -> Result<TokenInfo, Error> {
-        // 实现 iCloud token 刷新逻辑
-        todo!("实现 iCloud token 刷新")
-    }
-}
-```
-
-### 3.5 应用集成示例
-
-以下是应用如何集成 OAuth 授权和本库的完整示例：
-
-```rust
-use cloud_sync_lib::{CloudSyncLib, SyncConfig, CloudCredentials, CloudProvider};
-use oauth2::{
-    AuthUrl, ClientId, ClientSecret, CsrfToken, PkceCodeChallenge, RedirectUrl,
-    Scope, TokenUrl, AuthorizationCode, TokenResponse, RefreshToken,
-};
-use oauth2::basic::BasicClient;
-use oauth2::reqwest::async_http_client;
-use std::path::PathBuf;
-
-/// 应用的 OAuth 管理器
-struct AppOAuthManager {
-    token_manager: TokenManager,
-    oauth_configs: HashMap<String, OAuthConfig>,
-}
-
-impl AppOAuthManager {
-    /// 初始化 OAuth 客户端
-    fn create_oauth_client(&self, provider: &str) -> Result<BasicClient, Error> {
-        let config = self.oauth_configs.get(provider)
-            .ok_or(Error::UnsupportedProvider)?;
-        
-        let client = BasicClient::new(
-            ClientId::new(config.client_id.clone()),
-            Some(ClientSecret::new(config.client_secret.clone())),
-            AuthUrl::new(config.auth_url.clone())?,
-            Some(TokenUrl::new(config.token_url.clone())?),
-        )
-        .set_redirect_uri(RedirectUrl::new(config.redirect_uri.clone())?);
-        
-        Ok(client)
-    }
-    
-    /// 步骤1：生成授权 URL
-    pub fn generate_auth_url(&self, provider: &str) -> Result<(String, CsrfToken), Error> {
-        let client = self.create_oauth_client(provider)?;
-        let config = self.oauth_configs.get(provider).unwrap();
-        
-        // 使用 PKCE 增强安全性
-        let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
-        
-        let (auth_url, csrf_token) = client
-            .authorize_url(CsrfToken::new_random)
-            .add_scopes(config.scopes.iter().map(|s| Scope::new(s.to_string())))
-            .set_pkce_challenge(pkce_challenge)
-            .url();
-        
-        // 保存 pkce_verifier 和 csrf_token 供后续使用
-        // （实际应用中需要持久化保存）
-        
-        Ok((auth_url.to_string(), csrf_token))
-    }
-    
-    /// 步骤2：用授权码交换访问令牌
-    pub async fn exchange_code_for_token(
-        &self,
-        provider: &str,
-        code: String,
-        // pkce_verifier: PkceCodeVerifier,  // 从步骤1保存的
-    ) -> Result<TokenInfo, Error> {
-        let client = self.create_oauth_client(provider)?;
-        
-        let token_result = client
-            .exchange_code(AuthorizationCode::new(code))
-            // .set_pkce_verifier(pkce_verifier)
-            .request_async(async_http_client)
-            .await?;
-        
-        let token_info = TokenInfo {
-            access_token: token_result.access_token().secret().clone(),
-            refresh_token: token_result.refresh_token()
-                .map(|t| t.secret().clone()),
-            expires_at: SystemTime::now() + 
-                token_result.expires_in()
-                    .unwrap_or(Duration::from_secs(3600)),
-            provider: provider.to_string(),
-            user_id: "user_id_here".to_string(), // 需要从用户信息 API 获取
-        };
-        
-        // 保存 token
-        self.token_manager.save_token(
-            &token_info.user_id,
-            provider,
-            &token_info
-        )?;
-        
-        Ok(token_info)
-    }
-    
-    /// 步骤3：获取有效的 token（自动刷新）
-    pub async fn get_valid_token(
-        &self,
-        user_id: &str,
-        provider: &str,
-    ) -> Result<String, Error> {
-        let mut token = self.token_manager.load_token(user_id, provider)?;
-        
-        // 如果 token 即将过期（提前5分钟刷新）
-        let expiry_threshold = SystemTime::now() + Duration::from_secs(300);
-        if token.expires_at <= expiry_threshold {
-            // 刷新 token
-            token = self.token_manager.refresh_token(&token).await?;
-            // 保存新 token
-            self.token_manager.save_token(user_id, provider, &token)?;
-        }
-        
-        Ok(token.access_token)
-    }
-}
-
-/// 完整的应用使用示例
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // ========== 第一部分：OAuth 授权（应用负责） ==========
-    
-    let oauth_manager = AppOAuthManager::new();
-    
-    // 1. 生成授权 URL，引导用户授权
-    let (auth_url, csrf_token) = oauth_manager
-        .generate_auth_url("OneDrive")?;
-    
-    println!("请在浏览器中打开以下 URL 进行授权：");
-    println!("{}", auth_url);
-    
-    // 2. 用户授权后，应用接收到 authorization_code
-    // （这里简化处理，实际需要启动本地服务器接收回调）
-    let authorization_code = "received_from_redirect".to_string();
-    
-    // 3. 用授权码交换访问令牌
-    let token_info = oauth_manager
-        .exchange_code_for_token("OneDrive", authorization_code)
-        .await?;
-    
-    println!("授权成功！Token 已保存。");
-    
-    // ========== 第二部分：使用云盘同步库 ==========
-    
-    // 4. 配置同步库
-    let config = SyncConfig {
-        local_root: PathBuf::from("/path/to/local/folder"),
-        remote_root: "MyApp".to_string(),
-        incremental: true,
-        ignore_patterns: vec!["*.tmp".to_string()],
-    };
-    
-    let mut sync_lib = CloudSyncLib::new(config)?;
-    sync_lib.initialize()?;
-    
-    // 5. 获取有效的 token（自动刷新）
-    let access_token = oauth_manager
-        .get_valid_token(&token_info.user_id, "OneDrive")
-        .await?;
-    
-    // 6. 创建云盘凭证并执行同步
-    let credentials = CloudCredentials {
-        token: access_token,
-        provider: CloudProvider::OneDrive,
-        expires_at: Some(token_info.expires_at),
-        refresh_token: token_info.refresh_token,
-    };
-    
-    let result = sync_lib.sync_async(&credentials).await?;
-    println!("同步完成: 下载 {} 个，上传 {} 个文件", 
-        result.downloaded, result.uploaded);
-    
-    Ok(())
-}
-```
-
-### 3.6 安全最佳实践
-
-1. **使用 PKCE**：对于公共客户端（如桌面应用、移动应用），必须使用 PKCE (Proof Key for Code Exchange) 增强安全性
-
-2. **安全存储**：
-   - macOS: 使用 Keychain
-   - Windows: 使用 Windows Credential Manager
-   - Linux: 使用 Secret Service API (libsecret)
-
-3. **Token 生命周期管理**：
-   - 定期检查 token 是否过期
-   - 提前刷新（建议在过期前 5 分钟）
-   - 刷新失败时提示用户重新授权
-
-4. **错误处理**：
-   - 认证失败：清除本地 token，引导用户重新授权
-   - 网络错误：使用指数退避重试
-   - Token 被撤销：提示用户重新授权
-
-5. **不要在代码中硬编码**：
-   - Client Secret 应该从环境变量或配置文件读取
-   - 永远不要将密钥提交到版本控制系统
-
-### 3.7 职责边界总结
+### 3.5 职责边界总结
 
 | 职责 | 负责方 | 说明 |
 |------|--------|------|
@@ -459,15 +144,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 | Token 存储 | **调用应用** | 应用负责将 token 安全存储到系统密钥链 |
 | Token 刷新 | **调用应用** | 应用负责在 token 过期前刷新 |
 | Token 传递 | **调用应用** | 应用将有效的 access token 传递给库 |
-| 文件同步 | **本库** | 库使用传入的 token 执行文件同步操作 |
-| Token 验证 | **本库** | 库在使用 token 时会验证其有效性（通过 API 调用） |
+| 文件同步 | **本库 (Omnitree)** | 库使用传入的 token 执行文件同步操作 |
+| Token 验证 | **本库 (Omnitree)** | 库在使用 token 时会验证其有效性（通过 API 调用） |
 
-这种设计的优点：
-- ✅ **职责清晰**：认证和同步逻辑分离，库专注于多设备文件同步
-- ✅ **灵活性高**：应用可以自定义认证流程和 UI，适配不同平台
-- ✅ **多设备友好**：每个设备独立授权，互不干扰
-- ✅ **安全性好**：敏感的 Client Secret 不需要传入库
-- ✅ **可测试性强**：可以使用 mock token 测试同步功能
+### 3.6 设计优势
+
+这种职责分离的设计带来以下优势：
+
+- ✅ **职责清晰**：认证和同步逻辑分离，库专注于多设备文件同步核心功能
+- ✅ **灵活性高**：应用可以自定义认证流程和 UI，适配不同平台和用户体验需求
+- ✅ **多设备友好**：每个设备独立授权，互不干扰，用户可在不同设备上使用不同云盘账号
+- ✅ **安全性好**：敏感的 Client Secret 由应用管理，不需要传入库，降低安全风险
+- ✅ **可测试性强**：可以使用 mock token 独立测试同步功能，无需真实的 OAuth 流程
 
 ## 4. 同步流程设计
 
