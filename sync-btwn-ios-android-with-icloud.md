@@ -1,5 +1,5 @@
 # 使用 iCloudKit 实现 ios app、android app 数据用户私有数据的流程。
-
+```mermaid
 sequenceDiagram
     autonumber
     participant iOSUser as iOS 用户
@@ -89,3 +89,4 @@ sequenceDiagram
     CloudKit-->>iOSApp: 返回最新数据
     iOSApp->>iOSApp: 更新本地数据库
     iOSApp->>iOSUser: 自动刷新界面
+```
